@@ -1,3 +1,4 @@
+###Libraries and Database####
 library(phytools)
 library(tidyverse)
 library(DBI)
@@ -7,6 +8,7 @@ library(dbplyr)
 ###First restore the database available here - xxx.xxx.xxx using the pg_restore command
 con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_pub", bigint = "integer")
 
+###Fig 2A-D####
 nodes_list <- list(
   "Eukaryota" = c("781"),
   "Craniata" = c("876", "879"),
@@ -119,7 +121,7 @@ go_plot_list$Magnoliopsida
 go_plot_list$Evosea
 go_plot_list$Cyanobacteria
 
-###KEGG gains####
+####KEGG gains#####
 kegg_hierarchy <- read_tsv("data/20230713_kegg_pathway_hierarchy.tsv.gz")
 
 kegg_plot_list <- list()
