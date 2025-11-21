@@ -5,7 +5,7 @@ library(DBI)
 library(RPostgres)
 library(dbplyr)
 
-###First restore the database available here - xxx.xxx.xxx using the pg_restore command
+###First restore the database available here - https://russelllab.org/funcevol/ using the pg_restore command
 con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_pub", bigint = "integer")
 
 species_tree <- read.tree("data/species_tree_cleaned_final.nwk")
@@ -187,6 +187,7 @@ cellularity_transitions <- cellularity_transitions %>%
   left_join(d_state) %>% 
   select(p_node, d_node = V2, p_state, p_pp, d_state, d_pp) %>% 
   mutate(change = if_else(d_state != p_state, 1, 0))
+
 ###Fig 3####
 
 par(mfcol = c(1, 2))

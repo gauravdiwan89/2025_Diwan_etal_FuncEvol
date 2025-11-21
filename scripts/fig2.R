@@ -5,7 +5,7 @@ library(DBI)
 library(RPostgres)
 library(dbplyr)
 
-###First restore the database available here - xxx.xxx.xxx using the pg_restore command
+###First restore the database available here - https://russelllab.org/funcevol/ using the pg_restore command
 con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_pub", bigint = "integer")
 
 ###Fig 2A-D####
