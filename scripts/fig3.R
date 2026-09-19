@@ -6,14 +6,14 @@ library(RPostgres)
 library(dbplyr)
 
 ###First restore the database available here - https://russelllab.org/funcevol/ using the pg_restore command
-con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_pub", bigint = "integer")
+con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_revision", bigint = "integer")
 
-species_tree <- read.tree("data/species_tree_cleaned_final.nwk")
+species_tree <- sptree_revised <- read.tree("data/species_tree_cleaned_final.nwk")
 species_details <- read_tsv("data/TableS1.tsv")
 
 ###Fig 3####
 
-euk_tree <- keep.tip(read.newick("data/species_tree_for_Count.nwk"), species_details$tree_tip_label[species_details$superkingdom == "Eukaryota"])
+euk_tree <- keep.tip(sptree_revised, species_details$tree_tip_label[species_details$superkingdom == "Eukaryota"])
 
 ####Habitat transitions####
 ##ancestral reconstruction of habitat
@@ -22,10 +22,10 @@ habitat_species <- species_details %>%
   filter(!is.na(habitat)) #drops the bacteria and archaea
 
 # habitat_anc <- make.simmap(tree = euk_tree, x = habitat_species %>% select(OSCODE, habitat) %>% deframe(), model = "ER", nsim = 100, pi = c("Aquatic" = 1, "Terrestrial" = 0, "Host-associated"= 0, "Amphibian" = 0), Q = "mcmc")
-# save(habitat_anc, file = "data/20250514_habitat_anc_reconstruction.simmap")
+# save(habitat_anc, file = "data/20260722_habitat_anc_reconstruction.simmap")
 
 ##analyze the output
-load("data/20250514_habitat_anc_reconstruction.simmap")
+load("data/20260722_habitat_anc_reconstruction.simmap")
 
 habitat_anc_summary <- summary(habitat_anc)
 
@@ -109,10 +109,10 @@ euk_cell <- species_details %>%
   filter(!is.na(cellularity)) #drops the bacteria and archaea
 
 # cell_anc <- make.simmap(tree = euk_tree, x = euk_cell %>% select(OSCODE, cellularity) %>% deframe(), model = "ER", nsim = 100, pi = c(0, 1), Q = "mcmc")
-# save(cell_anc, file = "data/20250428_cellularity_anc_reconstruction.simmap")
+# save(cell_anc, file = "data/20260722_cellularity_anc_reconstruction.simmap")
 
 ##analyze the output
-load("data/20250428_cellularity_anc_reconstruction.simmap")
+load("data/20260722_cellularity_anc_reconstruction.simmap")
 
 cellularity_anc_summary <- summary(cell_anc)
 
@@ -188,7 +188,9 @@ cellularity_transitions <- cellularity_transitions %>%
   select(p_node, d_node = V2, p_state, p_pp, d_state, d_pp) %>% 
   mutate(change = if_else(d_state != p_state, 1, 0))
 
-###Fig 3####
+####plot####
+
+pdf(file = "Figure3_pheno_transitions.pdf", width = 20, height = 16, family = "Helvetica")
 
 par(mfcol = c(1, 2))
 
@@ -200,5 +202,7 @@ tiplabels(tip = habitat_transitions %>% filter(change == 1, d_state == "Terrestr
 
 plot(cellularity_anc_summary, ftype = "off", offset = 2, cex = 0.4, direction = "leftwards")
 tiplabels(tip = cellularity_transitions %>% filter(change == 1, p_state == "Unicellular", d_state == "Multicellular") %>% rowwise() %>% filter(length(getDescendants(euk_tree, d_node)) > 2) %>% pull(d_node) %>% as.numeric(), pch = 1, col = "#00aad4", cex = 3, lwd = 5)
+
+dev.off()
 
 ##this plot was exported and then formatted in Adobe Illustrator to produce figure 3

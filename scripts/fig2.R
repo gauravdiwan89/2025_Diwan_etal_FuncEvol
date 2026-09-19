@@ -6,21 +6,27 @@ library(RPostgres)
 library(dbplyr)
 
 ###First restore the database available here - https://russelllab.org/funcevol/ using the pg_restore command
-con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_pub", bigint = "integer")
+con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_revision", bigint = "integer")
 
-###Fig 2A-D####
+#### Fig 2A-D ####
+
 nodes_list <- list(
-  "Eukaryota" = c("781"),
-  "Craniata" = c("876", "879"),
-  "Metazoa" = c("834", "835"),
-  "Magnoliopsida" = c("797", "798"),
-  "Arthropoda" = c("867", "868"),
-  "Cyanobacteria" = c("614", "617"),
-  "Evosea" = c("823")
+  "Eukaryota" = c("548"),
+  "Euteleostomi" = c("693"),
+  "Deuterostomia" = c("689"),
+  "Metazoa + Choanoflagellate" = c("648", "649"),
+  "Embryophyta" = c("572"),
+  "Magnoliopsida" = c("575"),
+  "Halobacteriales" = c("545"),
+  "Dikarya" = c("603"),
+  "Dictyostelia" = c("595"),
+  "Cyanobacteria" = c("950", "953"),
+  "Pezizomycotina" = c("629")
 )
-nodes_sig_terms <- readRDS("data/20250428_go_enrichment_data.rds")
 
-go_obo <- ontologyIndex::get_ontology(file = "data/go-basic.obo", propagate_relationships = c("is_a", "part_of"))
+nodes_sig_terms <- readRDS("data/20260806_go_enrichment_data.rds")
+
+go_obo <- ontologyIndex::get_ontology(file = "data/go.obo", propagate_relationships = c("is_a", "part_of", "regulates", "occurs_in", "in_taxon"))
 
 full_go_lineage <- function(term, go_obo) {
   xx <- unlist(go_obo$name[unlist(go_obo$ancestors[go_obo$id[match(term, go_obo$name)]])])
@@ -28,237 +34,249 @@ full_go_lineage <- function(term, go_obo) {
 }
 
 nodes_sig_terms_desc <- lapply(1:length(nodes_sig_terms), function(x) {
-  
-  number <- 50
-  only_desc_terms <- unique(unlist(sapply(nodes_sig_terms[[x]]$BP[1:number], function(x) full_go_lineage(term = x, go_obo = go_obo))))
-  
   nodes_sig_terms[[x]] %>% 
-    filter(BP %in% only_desc_terms) %>% 
-    mutate(clade = names(nodes_list)[x]) #, node = list(nodes_list[[x]]))
+    mutate(clade = names(nodes_list)[x])
 }) %>% 
-  bind_rows()
+  bind_rows() %>%
+  arrange(-fishers_odds_ratio)
 
-#order by log odds ratio
-unique_items <- nodes_sig_terms_desc %>%
-  dplyr::slice(1:10, .by = clade) %>%
-  group_by(BP) %>%
-  mutate(n = n_distinct(clade)) %>% 
-  mutate(unique_in_group = n == 1) %>%
-  distinct(BP, clade, unique_in_group) %>%
-  filter(unique_in_group == TRUE) %>%
-  ungroup()
+#####treemaps####
 
-opts <- tibble(
-  clade = c("Eukaryota", "Metazoa", "Craniata", "Magnoliopsida", "Evosea", "Cyanobacteria"),
-  empty_bar = c(3, 4, 4, 4, 3, 2),
-  data_prep_cmd = c(
-    "rbind(data[1:8,], to_add[1,], data[9:10,], to_add[2:3,])", #Eukaryota
-    "rbind(data[1:2,], to_add[1,], data[3:8,], to_add[2,], data[9:10,], to_add[3:4,])", #Metazoa
-    "rbind(data[1:2,], to_add[1,], data[3:8,], to_add[2,], data[9:10,], to_add[3:4,])", #Craniata
-    "rbind(data[1:2,], to_add[1,], data[3:8,], to_add[2,], data[9:10,], to_add[3:4,])", #Angiosperms
-    "rbind(data[1:2,], to_add[1:2,], data[3:8,], data[9:10,], to_add[3,])", #Evosea
-    "rbind(data, to_add)" #Cyanobacteria
-  )
+library(simona)
+library(simplifyEnrichment)
+bp_dag <- create_ontology_DAG_from_GO_db(
+  namespace = "BP",
+  org_db = NULL
 )
 
-go_plot_list <- list()
-for(i in 1:nrow(opts)) {
-  clade_oi <- opts$clade[i]
-  data <- split(x = nodes_sig_terms_desc, f = nodes_sig_terms_desc$clade)[[clade_oi]] %>% 
-    filter(term_not_at_node_totals > 0) %>%
-    dplyr::slice(1:10, .by = clade)
+stuff_list <- NULL
+for(i in 1:length(nodes_sig_terms)) {
+  print(i)
+  go_ids_oi <- unique(go_obo$id[match(nodes_sig_terms[[i]]$bp[1:50], go_obo$name)])
+  go_sim <- term_sim(
+    bp_dag,
+    terms = go_ids_oi,
+    method = "Sim_Wang_2007"
+  )
   
-  empty_bar <- opts$empty_bar[i]
+  go_clusters <- cluster_terms(
+    go_sim,
+    method = "louvain"
+  )
   
-  to_add <- matrix(NA, empty_bar, ncol(data))
-  colnames(to_add) <- colnames(data)
+  cluster_key <- tibble(
+    go_id = rownames(go_sim),
+    bp = go_obo$name[match(go_id, go_obo$id)],
+    semantic_cluster = as.integer(go_clusters)
+  )
   
-  data <- eval(parse(text = opts$data_prep_cmd[i]))
+  stuff <- nodes_sig_terms[[i]] %>% 
+    inner_join(cluster_key) %>% 
+    group_by(semantic_cluster) %>% 
+    arrange(-term_at_node_totals, .by_group = T) %>% 
+    mutate(keyword = paste(na.omit(keyword_enrichment_from_GO(go_id = go_id)$keyword[1:2]), collapse = "|\n"))
   
-  data$id <- seq(1, nrow(data))
-  
-  label_data <- data
-  number_of_bar <- nrow(label_data)
-  angle <- (90 - ((1)*15)) - 360 * (label_data$id-0.5) / number_of_bar     # I substract 0.5 because the letter must have the angle of the center of the bars. Not extreme right(1) or extreme left (0)
-  label_data$hjust <- ifelse( angle < -90, 1, 0)
-  label_data$angle <- ifelse(angle < -90, angle+180, angle)
-  
-  max_y <- max(data$term_at_node_totals, na.rm = T)
-  
-  go_plot_list[[clade_oi]] <- ggplot(data, aes(x = factor(id), y = term_at_node_totals, fill = log2(fishers_odds_ratio))) +
-    geom_bar(stat = "identity") +
-    coord_polar(start = pi/(12)) +
-    scale_y_continuous(
-      limits = c(-25, NA),
-      expand = c(0, 0)
-    ) +
-    scale_fill_viridis_c(limits = c(0.9, 6)) +
-    theme_minimal() +
-    theme(
-      # Remove axis ticks and text
-      axis.title = element_blank(),
-      axis.ticks = element_blank(),
-      axis.text = element_blank(),
-      legend.position = "bottom",
-      # Ensure labels are not clipped
-      plot.margin = unit(rep(0, 4), "cm"),
-      panel.grid.major.y = element_line(color = "gray80", size = 0.5)
-    ) + 
-    geom_text(data = label_data, aes(x = id, y = term_at_node_totals + 5, label = BP, hjust = hjust), color = "black",alpha = 1, size = 3.5, angle =  label_data$angle, inherit.aes = FALSE )  +
-    # Add y-axis labels manually
-    annotate("text", x = 0.3, y = seq(0, max_y+25, by = 25), label = seq(0, max_y+25, by = 25), angle = 0, vjust = -1, hjust = 1, color = "black", size = 3.5) +
-    labs(
-      x = "",
-      y = "Number of Genes",
-      fill = "Log2 Odds Ratio"
-    )
+  stuff_list[[i]] <- stuff
+  names(stuff_list)[i] <- names(nodes_list)[i]
 }
 
-go_plot_list$Eukaryota
-go_plot_list$Metazoa
-go_plot_list$Craniata
-go_plot_list$Magnoliopsida
-go_plot_list$Evosea
-go_plot_list$Cyanobacteria
+library(treemap)
+for(nm in names(stuff_list)) {
+  pdf(file = paste0(nm, "_treemap.pdf"), width = 4, height = 4, family = "ArialMT")
+  treemap(dtf = stuff_list[[nm]], index = c("keyword", "bp"), vSize = "term_at_node_totals", type = "categorical", vColor = "keyword", inflate.labels = F, lowerbound.cex.labels = 0, bg.labels = "#CCCCCCD9", position.legend = "none", force.print.labels = T, title = "", aspRatio = 1, overlap.labels = 1)
+  dev.off()
+}
 
 ####KEGG gains#####
 kegg_hierarchy <- read_tsv("data/20230713_kegg_pathway_hierarchy.tsv.gz")
 
-kegg_plot_list <- list()
-for(i in 1:nrow(opts)) {
-  clade_oi <- opts$clade[i]
-  
-  data <- tbl(con, "kegg_gains_parsimony") %>% 
-    filter(node %in% !!nodes_list[[clade_oi]]) %>% 
-    group_by(pathway_name) %>% 
-    summarize(prop_comp_gained = sum(prop_comp_gained), n_comp_gained = sum(n_comp_gained)) %>% 
-    collect() %>% 
-    left_join(kegg_hierarchy) %>% 
-    filter(H1 != "Human Diseases") %>%
-    {if(i <= 3) group_by(., H2) else group_by(., pathway_name)} %>% 
-    summarize(avg_prop_gained = mean(prop_comp_gained), total_comp_gained = sum(n_comp_gained)) %>% 
-    arrange(-avg_prop_gained) %>% 
-    slice_max(order_by = avg_prop_gained, n = 10)
-  
-  empty_bar <- 2
-  
-  to_add <- matrix(NA, empty_bar, ncol(data))
-  colnames(to_add) <- colnames(data)
-  
-  data <- rbind(data, to_add)
-  
-  data$id <- seq(1, nrow(data))
-  
-  label_data <- data
-  colnames(label_data)[colnames(label_data) == "pathway_name"] <- "H2"
-  number_of_bar <- nrow(label_data)
-  angle <- (90 - 30) - 360 * (label_data$id-0.5) / number_of_bar  # I substract 0.5 because the letter must have the angle of the center of the bars. Not extreme right(1) or extreme left (0)
-  label_data$hjust <- ifelse( angle < -90, 1, 0)
-  label_data$angle <- ifelse(angle < -90, angle+180, angle)
-  
-  max_y <- max(data$avg_prop_gained*100, na.rm = T)
-  
-  kegg_plot_list[[clade_oi]] <- ggplot(data, aes(x = factor(id), y = avg_prop_gained*100, fill = total_comp_gained)) +
-    geom_bar(stat = "identity") +
-    coord_polar(start = pi/7) +
-    scale_y_continuous(
-      limits = c(-20, NA),
-      expand = c(0, 0)
-    ) +
-    scale_fill_viridis_c(option = "F", limits = c(0, if(i <= 3) 650 else max(data$total_comp_gained))) +
-    theme_minimal() +
-    theme(
-      # Remove axis ticks and text
-      axis.title = element_blank(),
-      axis.ticks = element_blank(),
-      axis.text = element_blank(),
-      legend.position = "bottom",
-      # Ensure labels are not clipped
-      plot.margin = unit(rep(0, 4), "cm"),
-      panel.grid.major.y = element_line(color = "gray80", size = 0.5)
-    ) + 
-    geom_text(data = label_data, aes(x = id, y = (avg_prop_gained*100) + 5, label = H2, hjust = hjust), color = "black",alpha = 1, size = 3.5, angle =  label_data$angle, inherit.aes = FALSE )  +
-    # Add y-axis labels manually
-    annotate("text", x = 0.4, y = seq(0, max_y + 5, by = 20), label = seq(0, max_y + 5, by = 20), angle = 0, vjust = -1, hjust = 1, color = "black", size = 3.5) +
-    labs(
-      x = "",
-      y = "",
-      fill = "# components gained"
-    )
-}
+data <- tbl(con, "kegg_gains_parsimony") %>% 
+  inner_join(enframe(nodes_list, name = "clade", value = "node") %>% unnest() %>% mutate(node = as.numeric(node)), copy = T) %>% 
+  group_by(clade, pathway_name) %>% 
+  summarize(prop_comp_gained = sum(prop_comp_gained), n_comp_gained = sum(n_comp_gained)) %>% 
+  collect() %>% 
+  left_join(kegg_hierarchy) %>% 
+  filter(H1 != "Human Diseases") %>%
+  group_by(clade, pathway_name) %>% 
+  summarize(avg_prop_gained = mean(prop_comp_gained), total_comp_gained = sum(n_comp_gained)) %>% 
+  group_by(clade) %>% 
+  arrange(-avg_prop_gained) %>% 
+  slice_max(order_by = avg_prop_gained, n = 10) %>% 
+  mutate(pathway_name = tidytext::reorder_within(x = pathway_name, by = avg_prop_gained, within = clade))
 
-kegg_plot_list$Eukaryota
-kegg_plot_list$Metazoa
-kegg_plot_list$Craniata
-kegg_plot_list$Magnoliopsida
-kegg_plot_list$Evosea
-kegg_plot_list$Cyanobacteria
+ggplot(data, aes(y = pathway_name, x = avg_prop_gained*100, fill = total_comp_gained)) +
+  geom_bar(stat = "identity") +
+  # scale_x_continuous(expand = c(0, NA)) +
+  scale_fill_viridis_c(option = "F", limits = c(0, max(data$total_comp_gained))) +
+  theme_bw(base_size = 14) +
+  facet_wrap(~factor(clade, levels = names(nodes_list)[c(1, 4, 3, 2, 7, 9, 8, 11, 10, 5, 6)]), scales = "free", ncol = 2) +
+  tidytext::scale_y_reordered() +
+  labs(x = "% Pathway gained", y = "KEGG Pathway", fill = "# of components\ngained")
 
-###Figure 2E####
+####Figure 2E####
+con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_revision", bigint = "integer")
 
 species_tree <- read.tree("data/species_tree_cleaned_final.nwk")
 major_clades <- read_tsv("data/TableS2.tsv")
 
 all_parents_finder <- function(x) {
   all_parents <- NULL
-  parent_oi <- getParent(species_tree, as.numeric(x))
+  parent_oi <- getParent(sptree_revised, as.numeric(x))
   all_parents <- c(all_parents, parent_oi)
   while(!is.null(parent_oi)) {
-    parent_oi <- getParent(species_tree, parent_oi)
+    parent_oi <- getParent(sptree_revised, parent_oi)
     all_parents <- c(all_parents, parent_oi)
   }
   toString(unique(all_parents))
 }
 
-term_origins <- function(search_term, mode = "gene") {
+term_origins <- function(search_term, mode = c("gene", "hog")[1], drop_taxon_violations = T, drop_iea = F, drop_model_orgs = F, use_full_lineage = T) {
   if(mode == "gene") {
     og_gains_losses <- tbl(con, "orthologs_gains_losses_parsimony")
-    print(paste("Starting with search term:", search_term, "..."))
-    sleep_og_hist <- tbl(con, "ptns_go_bp") %>% 
-      mutate(keyword = as.character(search_term)) %>% 
-      filter(if_any(.cols = -keyword, .fns = ~ grepl(pattern = keyword, x = .x, ignore.case = TRUE))) %>% 
-      distinct(uniprot_acc) %>%
-      inner_join(tbl(con, "ptns_og_phylo")) %>%
-      inner_join(og_gains_losses) %>% 
-      collect()
-    
-    print("Counting gains...")
-    counts_table <- sleep_og_hist %>% 
-      pivot_longer(cols = c(gain_nodes), names_to = "gain_type", values_to = "node") %>% 
-      mutate(node = strsplit(node, split = ", ")) %>% 
-      unnest() %>% 
-      filter(node != "") %>% 
-      mutate(node = as.numeric(node)) %>% 
-      group_by(node) %>%
-      summarize(n = length(unique(HOG))) %>%
-      left_join(major_clades %>% dplyr::select(node, name, level = taxa_level, full_taxonomy, full_taxonomy_levels, other_names), by = c("node")) %>% 
-      filter(as.numeric(node) > Ntip(species_tree)) %>%
-      arrange(-n)
+  } else if(mode == "hog") {
+    og_gains_losses <- tbl(con, "og_gains_losses_parsimony")
+  }
+  print(paste("Starting with search term:", search_term, "..."))
+  t1 <- tbl(con, "ptns_go_bp") %>% 
+    mutate(keyword = as.character(search_term)) 
+  
+  if(drop_iea) {
+    t1 <- t1 %>% 
+      filter(evidence_code != "IEA")
   }
   
-  if(nrow(counts_table) > 0) {
-    print(paste("Building taxonomy for", nrow(counts_table), "entries ..."))
+  if(use_full_lineage) {
+    t1 <- t1 %>% 
+      select(uniprot_acc, bp, keyword, matches("l\\d+")) %>% 
+      filter(if_any(.cols = -keyword, .fns = ~ grepl(pattern = keyword, x = .x, ignore.case = TRUE)))
+  } else {
+    t1 <- t1 %>% 
+      filter(grepl(pattern = keyword, x = bp))
+  }
+  
+  t2 <- t1 %>% 
+    # distinct(uniprot_acc, bp) %>%
+    inner_join(tbl(con, "ptns_og_phylo"))
+  
+  if(drop_model_orgs) {
+    t2 <- t2 %>% 
+      filter(!org %in% model_orgs)
+  }
+  
+  sleep_og_hist <- t2 %>%
+    inner_join(og_gains_losses) %>% 
+    collect()
+  
+  if(drop_taxon_violations) {
+    all_node_desc <- lapply(c((Ntip(sptree_revised) + 1) : (Ntip(sptree_revised) + Nnode(sptree_revised))), function(x) {
+      xx <- sptree_revised$tip.label[getDescendants(sptree_revised, x)]
+      xx[!is.na(xx)]
+    })
+    names(all_node_desc) <- c((Ntip(sptree_revised) + 1) : (Ntip(sptree_revised) + Nnode(sptree_revised)))
+    all_node_desc <- all_node_desc %>% enframe(name = "node", value = "desc") %>% unnest()
     
-    counts_table <- counts_table %>%
-      mutate(
-        taxa_names = str_split(full_taxonomy, ", ", simplify = FALSE),
-        taxa_levels = str_split(full_taxonomy_levels, ", ", simplify = FALSE),
-        phylum_name = map2_chr(taxa_levels, taxa_names, ~if_else("order" %in% .x, .y[which(.x == "order")][1], NA_character_))
-      ) %>% 
-      mutate(
-        phylum = case_when(
-          level %in% c("kingdom", "superkingdom", "phylum", "subphylum", "class", "order") ~ name,
-          !is.na(phylum_name) ~ phylum_name,
-          TRUE ~ name
+    
+    prop_candidates <- sleep_og_hist %>%
+      select(uniprot_acc, bp, gain_nodes) %>%
+      separate_longer_delim(gain_nodes, delim = ", ") %>%
+      rename(node = gain_nodes) %>%
+      filter(!is.na(node), node != "") %>%
+      left_join(all_node_desc, by = "node") %>%
+      rename(organism_id = desc) %>% 
+      filter(!is.na(organism_id)) %>%
+      distinct(uniprot_acc, bp, node, organism_id)
+    
+    message("Beaming candidate protein histories to the DB for testing...")
+    copy_to(
+      con,
+      prop_candidates,
+      name = "tmp_prop_candidates",
+      temporary = TRUE,
+      overwrite = TRUE,
+      indexes = list(
+        c("organism_id", "bp")
+      )
+    )
+    
+    prop_candidates_db <- tbl(con, "tmp_prop_candidates")
+    
+    taxon_db <- tbl(con, "go_bp_taxon_constraints") %>%
+      select(
+        organism_id,
+        go_term,
+        can_exist
+      )
+    
+    taxon_test_db <- prop_candidates_db %>%
+      left_join(
+        taxon_db,
+        join_by(
+          organism_id,
+          bp == go_term
         )
       ) %>%
-      select(-taxa_names, -taxa_levels, -phylum_name)
+      mutate(
+        taxon_allowed = coalesce(can_exist, TRUE)
+      )
+    message("Testing if GO terms are allowed in the decendant species...")
+    taxon_test <- taxon_test_db %>%
+      collect()
+    
+    allowed_taxon_go <- taxon_test %>% filter(taxon_allowed) %>% distinct(uniprot_acc, bp, node)
+    
+    sleep_og_hist2 <- sleep_og_hist %>%
+      separate_longer_delim(gain_nodes, delim = ", ") %>%
+      rename(node = gain_nodes) %>%
+      filter(!is.na(node), node != "") %>% 
+      inner_join(allowed_taxon_go)
+    
+    dbExecute(con, "DROP TABLE IF EXISTS tmp_prop_candidates;")
+    
+  } else {
+    sleep_og_hist2 <- sleep_og_hist %>%
+      separate_longer_delim(gain_nodes, delim = ", ") %>%
+      rename(node = gain_nodes) %>%
+      filter(!is.na(node), node != "")
+  }
+  
+  print("Counting gains...")
+  counts_table <- sleep_og_hist2 %>% 
+    # pivot_longer(cols = c(gain_nodes), names_to = "gain_type", values_to = "node") %>% 
+    # mutate(node = strsplit(node, split = ", ")) %>% 
+    # unnest() %>% 
+    # filter(node != "") %>% 
+    mutate(node = as.numeric(node)) %>% 
+    group_by(node) %>%
+    summarize(n = length(unique(HOG))) %>% 
+    left_join(major_clades %>% dplyr::select(node = node_name, name, level, full_taxonomy, full_taxonomy_levels, other_names), by = c("node")) %>% 
+    filter(as.numeric(node) > Ntip(sptree_revised)) %>%
+    arrange(-n)
+  
+  
+  if(nrow(counts_table) > 0) {
+    # print(paste("Building taxonomy for", nrow(counts_table), "entries ..."))
+    # 
+    # counts_table <- counts_table %>%
+    #   mutate(
+    #     taxa_names = str_split(full_taxonomy, ", ", simplify = FALSE),
+    #     taxa_levels = str_split(full_taxonomy_levels, ", ", simplify = FALSE),
+    #     phylum_name = map2_chr(taxa_levels, taxa_names, ~if_else("order" %in% .x, .y[which(.x == "order")][1], NA_character_))
+    #   ) %>% 
+    #   mutate(
+    #     phylum = case_when(
+    #       level %in% c("kingdom", "superkingdom", "phylum", "subphylum", "class", "order") ~ name,
+    #       !is.na(phylum_name) ~ phylum_name,
+    #       TRUE ~ name
+    #     )
+    #   ) %>%
+    #   select(-taxa_names, -taxa_levels, -phylum_name)
     
     counts_table %>% 
+      mutate(phylum = paste(node, name, sep = "|")) %>% 
       group_by(phylum) %>%
       summarize(n = sum(n)) %>% 
       mutate(
-        perc = round(n/sum(n)*100, digits = 1),
+        perc = round(n/sum(n)*100, digits = 2),
         relative_prop = n/max(n), 
         z_score = (n - mean(n))/sd(n), 
         p_value = 2 * pnorm(-abs(z_score)),
@@ -278,17 +296,17 @@ term_origins <- function(search_term, mode = "gene") {
   }
 }
 
-terms_oi_table <- rbind(
-  term_origins(search_term = "photosynthesis", mode = "gene"),
-  term_origins(search_term = "brain", mode = "gene"),
-  term_origins(search_term = "nuclear pore", mode = "gene"),
-  term_origins(search_term = "adaptive immun", mode = "gene"),
-  term_origins(search_term = "heart development", mode = "gene"),
-  term_origins(search_term = "flagella|flagellum", mode = "gene"),
-  term_origins(search_term = "CRISPR", mode = "gene")
+terms_oi_table_new <- rbind(
+  term_origins(search_term = "photosynthesis", mode = "gene", drop_taxon_violations = T, drop_iea = F, drop_model_orgs = F, use_full_lineage = T),
+  term_origins(search_term = "brain", mode = "gene", drop_taxon_violations = T, drop_iea = F, drop_model_orgs = F, use_full_lineage = T),
+  term_origins(search_term = "nuclear pore", mode = "gene", drop_taxon_violations = T, drop_iea = F, drop_model_orgs = F, use_full_lineage = T),
+  term_origins(search_term = "adaptive immun", mode = "gene", drop_taxon_violations = T, drop_iea = F, drop_model_orgs = F, use_full_lineage = T),
+  term_origins(search_term = "heart development", mode = "gene", drop_taxon_violations = T, drop_iea = F, drop_model_orgs = F, use_full_lineage = T),
+  term_origins(search_term = "flagella|flagellum", mode = "gene", drop_taxon_violations = T, drop_iea = F, drop_model_orgs = F, use_full_lineage = T),
+  term_origins(search_term = "CRISPR", mode = "gene", drop_taxon_violations = T, drop_iea = F, drop_model_orgs = F, use_full_lineage = T)
 )
 
-terms_wider <- terms_oi_table %>% 
+terms_wider <- terms_oi_table_new %>% 
   mutate(term = paste0(term, " (", n_groups, ")")) %>% 
   group_by(term) %>% 
   mutate(c_perc = cumsum(perc)) %>% 
@@ -296,7 +314,7 @@ terms_wider <- terms_oi_table %>%
   pivot_wider(id_cols = term, names_from = phylum, values_from = perc) %>% 
   mutate(across(-term, ~ replace_na(., 0)))
 
-col_order_temp <- colnames(terms_wider)[-1][match(unique(major_clades$name[as.numeric(major_clades$node)>508]), colnames(terms_wider)[-1], nomatch = F)]
+col_order_temp <- colnames(terms_wider)[-1][match(unique(major_clades$name[as.numeric(major_clades$node_name)>508]), str_split_i(colnames(terms_wider)[-1], pattern = "[|]", i = 2), nomatch = F)]
 col_order <- unique(col_order_temp[!is.na(col_order_temp)])
 
 scale_high <- if(ceiling(max(terms_oi_table$perc)) %% 5 == 0) {
@@ -307,12 +325,12 @@ scale_high <- if(ceiling(max(terms_oi_table$perc)) %% 5 == 0) {
     xx <- xx + 1
   }
 }
-breaks_oi <- seq(0, xx, 2)
+breaks_oi <- seq(0, xx, 1)
 f3 <- terms_wider %>% 
   pivot_longer(-term) %>% 
-  left_join(terms_oi_table %>% dplyr::rename(name = phylum) %>% mutate(term = paste0(term, " (", n_groups, ")"), Significant = if_else(p_value < 0.05, "*", "")), by = c("term", "name")) %>% 
+  left_join(terms_oi_table_new %>% dplyr::rename(name = phylum) %>% mutate(term = paste0(term, " (", n_groups, ")"), Significant = if_else(p_value < 0.05, "*", "")), by = c("term", "name")) %>% 
   replace_na(list(n = 0)) %>% 
-  mutate(perc_2.5 = value > 2) %>% 
+  mutate(perc_2.5 = value >= 2) %>% 
   filter(any(perc_2.5), .by = name) %>% 
   mutate(name = factor(name, levels = col_order)) %>%
   drop_na(name) %>% 
@@ -335,32 +353,31 @@ f3 <- terms_wider %>%
 x_axis_labels <- unique(f3$data$name)[order(match(unique(f3$data$name), levels(f3$data$name)))]
 
 kngdm_oi <- major_clades %>% 
-  filter(as.numeric(node) > 508) %>% 
-  dplyr::slice(match(unique(f3$data$name), name)) %>% 
+  filter(as.numeric(node_name) > 508) %>% 
+  dplyr::slice(match(str_split_i(x_axis_labels, pattern = "[|]", i = 1), node_name)) %>% 
   rowwise() %>% 
-  mutate(parents = all_parents_finder(x = node)) %>% 
+  mutate(parents = all_parents_finder(x = node_name)) %>% 
   mutate(kng_name = case_when(
-    grepl("510", parents) ~ "Bacteria",
-    grepl("781", parents) ~ "Eukaryota",
-    grepl("979", parents) ~ "Archaea",
+    grepl("746", parents) ~ "Bacteria",
+    grepl("548", parents) ~ "Eukaryota",
+    grepl("511", parents) ~ "Archaea",
     TRUE ~ name
   )) %>% 
-  distinct(name, kng_name) %>% 
+  distinct(node_name, kng_name) %>% 
   deframe()
 
-euk_line_x <- match(names(kngdm_oi)[kngdm_oi == "Eukaryota"][1], x_axis_labels)
-arc_line_x <- match(names(kngdm_oi)[kngdm_oi == "Archaea"][1], x_axis_labels)
+euk_line_x <- match(names(kngdm_oi)[kngdm_oi == "Eukaryota"][1], str_split_i(x_axis_labels, pattern = "[|]", i = 1))
+bac_line_x <- match(names(kngdm_oi)[kngdm_oi == "Bacteria"][1], str_split_i(x_axis_labels, pattern = "[|]", i = 1))
 
 f3 <- f3 + geom_vline(xintercept = euk_line_x - 0.5, linewidth = 1)
-f3 <- f3 + geom_vline(xintercept = arc_line_x - 0.5, linewidth = 1)
-
+f3 <- f3 + geom_vline(xintercept = bac_line_x - 0.5, linewidth = 1)
 f3
 
-##Figure S10####
+#####Figure S13####
 breaks_oi <- seq(0, ceiling(max(terms_oi_table$perc)), 1)
 sf3 <- terms_wider %>% 
   pivot_longer(-term) %>% 
-  left_join(terms_oi_table %>% dplyr::rename(name = phylum) %>% mutate(term = paste0(term, " (", n_groups, ")")), by = c("term", "name")) %>% 
+  left_join(terms_oi_table_new %>% dplyr::rename(name = phylum) %>% mutate(term = paste0(term, " (", n_groups, ")")), by = c("term", "name")) %>% 
   replace_na(list(n = 0)) %>%
   mutate(name = factor(name, levels = col_order)) %>%
   drop_na(name) %>% 
@@ -383,23 +400,23 @@ sf3 <- terms_wider %>%
 x_axis_labels <- unique(sf3$data$name)[order(match(unique(sf3$data$name), levels(sf3$data$name)))]
 
 kngdm_oi <- major_clades %>% 
-  filter(as.numeric(node) > 508) %>% 
-  dplyr::slice(match(unique(sf3$data$name), name)) %>% 
+  filter(as.numeric(node_name) > 508) %>% 
+  dplyr::slice(match(str_split_i(x_axis_labels, pattern = "[|]", i = 1), node_name)) %>% 
   rowwise() %>% 
-  mutate(parents = all_parents_finder(x = node)) %>% 
+  mutate(parents = all_parents_finder(x = node_name)) %>% 
   mutate(kng_name = case_when(
-    grepl("510", parents) ~ "Bacteria",
-    grepl("781", parents) ~ "Eukaryota",
-    grepl("979", parents) ~ "Archaea",
+    grepl("746", parents) ~ "Bacteria",
+    grepl("548", parents) ~ "Eukaryota",
+    grepl("511", parents) ~ "Archaea",
     TRUE ~ name
   )) %>% 
-  distinct(name, kng_name) %>% 
+  distinct(node_name, kng_name) %>% 
   deframe()
 
-euk_line_x <- match(names(kngdm_oi)[kngdm_oi == "Eukaryota"][1], x_axis_labels)
-arc_line_x <- match(names(kngdm_oi)[kngdm_oi == "Archaea"][1], x_axis_labels)
+euk_line_x <- match(names(kngdm_oi)[kngdm_oi == "Eukaryota"][1], str_split_i(x_axis_labels, pattern = "[|]", i = 1))
+bac_line_x <- match(names(kngdm_oi)[kngdm_oi == "Bacteria"][1], str_split_i(x_axis_labels, pattern = "[|]", i = 1))
 
 sf3 <- sf3 + geom_vline(xintercept = euk_line_x - 0.5, size = 1.5)
-sf3 <- sf3 + geom_vline(xintercept = arc_line_x - 0.5, size = 1.5)
+sf3 <- sf3 + geom_vline(xintercept = bac_line_x - 0.5, size = 1.5)
 
 sf3

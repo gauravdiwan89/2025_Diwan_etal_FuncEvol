@@ -6,22 +6,23 @@ library(RPostgres)
 library(dbplyr)
 
 ###First restore the database available here - https://russelllab.org/funcevol/ using the pg_restore command
-con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_pub", bigint = "integer")
+con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_revision", bigint = "integer")
 
 species_tree <- read.tree("data/species_tree_cleaned_final.nwk")
 tt_dendo <- chronos(species_tree)
 species_details <- read_tsv("data/TableS1.tsv")
 major_clades <- read_tsv("data/TableS2.tsv")
-prop_orthologs_present <- read_tsv("data/genomic_expectation.tsv.gz")
+prop_orthologs_present <- read_tsv("data/20260723_genomic_expectations.tsv.gz")
 
-euk_tree <- keep.tip(read.newick("data/species_tree_for_Count.nwk"), species_details$tree_tip_label[species_details$superkingdom == "Eukaryota"])
+euk_tree <- keep.tip(species_tree, species_details$tree_tip_label[species_details$superkingdom == "Eukaryota"])
 
 source("scripts/fig5_functions.R")
 
 ####Get the terrestrial transition nodes####
-load("data/20250514_habitat_anc_reconstruction.simmap")
+load("data/20260722_habitat_anc_reconstruction.simmap")
 
 habitat_anc_summary <- summary(habitat_anc)
+
 ace_matrix <- habitat_anc_summary$ace
 
 habitat_transitions <- euk_tree$edge %>% 
@@ -95,6 +96,10 @@ habitat_transitions <- habitat_transitions %>%
   select(p_node, d_node = V2, p_state, p_pp, d_state, d_pp) %>% 
   mutate(change = if_else(d_state != p_state, 1, 0))
 
+habitat_transitions_orig <- habitat_transitions %>% 
+  mutate(p_node = gsub("Node", "", euk_tree$node.label[as.numeric(p_node) - Ntip(euk_tree)])) %>% 
+  mutate(d_node = if_else(!is.na(as.numeric(d_node)), gsub("Node", "", euk_tree$node.label[as.numeric(d_node) - Ntip(euk_tree)]), d_node))
+
 aq2ter_nodes <- habitat_transitions %>% 
   rowwise() %>% 
   mutate(n_desc = sum(!is.na(euk_tree$tip.label[getDescendants(euk_tree, d_node)]), na.rm = T)) %>% 
@@ -160,7 +165,7 @@ aq2ter_nodes_posn_tbl <- rbind(
   )
 ) %>% 
   rowwise() %>% 
-  mutate(node_height = nodeheight(tt_dendo, nodes)) %>% 
+  mutate(node_height = nodeheight(species_tree, nodes)) %>% 
   ungroup() %>% 
   group_by(lineage) %>% 
   arrange(node_height, .by_group = T) %>% 
@@ -180,8 +185,11 @@ aq2ter_nodes_posn_tbl <- aq2ter_nodes_posn_tbl %>%
   rowwise() %>% 
   mutate(
     rel_posn = case_when(
-      node_height <= midpoint ~ node_height/midpoint/2,
-      node_height > midpoint ~ scales::rescale(node_height, to = c(0.5, 1), from = c(midpoint, max_val)))
+      as.numeric(nodes) <= Ntip(species_tree) ~ 1,
+      node_height < midpoint ~ scales::rescale(node_height, to = c(0, 0.5), from = c(min_val, midpoint)),
+      node_height > midpoint ~ scales::rescale(node_height, to = c(0.5, 1), from = c(midpoint, max_val)),
+      node_height == midpoint ~ 0.5
+    )
   ) %>% 
   ungroup() %>% 
   select(-midpoint, -min_val, -max_val)
@@ -190,11 +198,11 @@ aq2ter_nodes_posn_tbl <- aq2ter_nodes_posn_tbl %>%
 
 genes_oi <- list(
   "KEAP1/NRF-2" = c("Q14145", "Q16236"), 
-  "Hox Genes" = readLines("data/homeobox_ptn_acc"),
-  "Aquaporins" = readLines("data/aquaporins.txt"),
+  "Hox Genes" = readLines("funcevol_ms_scripts/data/homeobox_ptn_acc"),
+  "Aquaporins" = readLines("funcevol_ms_scripts/data/aquaporins.txt"),
   "Noggin" = "Q13253",
   "BMP-4" = "P12644",
-  "Eyeless/Pax6" = c("Q05201", "P63015"),
+  "Eyeless/Pax6" = c("O18381", "P63015"),
   "Pax2" = "P32114",
   "GRAS TF" = c("A7U4T7", "Q9M384", "Q9SZF7", "Q9LRW3", "Q9ZWC5", "Q9SUF5", "Q9M000", "Q9LDL7", "Q9CAN3", "G7L166", "G7JMM0", "Q3EDH0")
 )
@@ -243,7 +251,7 @@ aq2ter_nodes_posn_category_props_og <- aq2ter_nodes_posn_tbl %>%
 
 aq2ter_nodes_posn_category_props <- aq2ter_nodes_posn_tbl %>% 
   left_join(aq2ter_genes_oi_evol_history %>% mutate(node = as.character(node)), join_by(nodes == node)) %>% 
-  left_join(major_clades %>% transmute(lineage = as.character(node), name)) %>% 
+  left_join(major_clades %>% transmute(lineage = as.character(node_name), name)) %>% 
   group_by(lineage, name, nodes, rel_posn, category) %>% 
   summarize(prop_present = sum(State == "Present")/n_distinct(gene), prop_absent = sum(State == "Absent")/n_distinct(gene), n_genes = n_distinct(gene), .groups = "drop") %>% 
   mutate(non_zeros = n_distinct(lineage[prop_present > 0.25]), .by = c(category)) %>% 
@@ -258,7 +266,7 @@ aq2ter_nodes_posn_category_props <- aq2ter_nodes_posn_tbl %>%
     
     # enrichment ratio just for plotting / effect size
     enrichment_ratio = prop_present / prop_expectation
-  ) %>% 
+  ) %>%
   rowwise() %>%
   mutate(
     # run one-sided binomial test: P(X >= k_obs | n_set, p = prop_expectation)
@@ -279,8 +287,8 @@ aq2ter_nodes_posn_category_props <- aq2ter_nodes_posn_tbl %>%
   ungroup() %>%
   mutate(
     binom_padj = p.adjust(binom_pval, method = "BH")
-  ) %>% 
-  mutate(pt_shape = if_else(binom_padj < 0.05, "*", "NS")) %>% 
+  ) %>%
+  mutate(pt_shape = if_else(binom_padj < 0.05, "*", "NS")) %>%
   mutate(cat_label = paste0(category, "\n", n_genes, " gene(s)\n", "XXXXX"))
 
 col_palette <- setNames(rep(RColorBrewer::brewer.pal(n = length(aq2ter_nodes_orig), name = "Dark2"), 1) , c(aq2ter_nodes_orig))
@@ -302,24 +310,25 @@ f5a <- aq2ter_nodes_posn_category_props %>%
   geom_vline(aes(xintercept = 0.5), colour = "darkblue", linetype = "dashed") +
   geom_line(data = prop_orthologs_present %>% left_join(aq2ter_nodes_posn_tbl %>% transmute(node = as.numeric(nodes), rel_posn)), mapping = aes(x = rel_posn, y = prop_present*100), colour = "darkred", linetype = "dotted", linewidth = 0.5) +
   geom_line(data = aq2ter_nodes_posn_category_props_tbl %>% filter(!category %in% c("Type I ORs", "Type II ORs")), mapping = aes(x = rel_posn, y = .fitted*100, colour = col_cat), linewidth = 1.25, inherit.aes = F) +
-  geom_point(aes(shape = pt_shape), size = 2, alpha = 0.3) +
-  geom_vline(aes(xintercept = rel_posn), colour = "gray40", linewidth = 2.5, alpha = 0.5, data = (aq2ter_nodes_posn_category_props_og  %>% filter(!category %in% c("Type I ORs", "Type II ORs")) %>% filter(earliest_gain > 0) %>% distinct(rel_posn, category, earliest_gain)), inherit.aes = F) +
+  geom_point(aes(shape = pt_shape), size = 2, alpha = 0.3, show.legend = F) +
+  geom_vline(aes(xintercept = rel_posn), colour = "gray40", linewidth = 1.5, alpha = 0.5, data = (aq2ter_nodes_posn_category_props_og  %>% filter(!category %in% c("Type I ORs", "Type II ORs")) %>% filter(earliest_gain > 0) %>% distinct(rel_posn, category, earliest_gain)), inherit.aes = F) +
   facet_wrap(category~., ncol = 2, scales = "free_y", labeller = labeller(category = setNames(aq2ter_nodes_posn_category_props$cat_label, aq2ter_nodes_posn_category_props$category))) +
-  scale_colour_identity(labels = (major_clades %>% dplyr::slice(match(aq2ter_nodes_orig, node)) %>% pull(name) %>% as.character()), breaks = as.character(col_palette[1:length(aq2ter_nodes_orig)]), guide = "legend") +
+  scale_colour_identity(labels = (major_clades %>% dplyr::slice(match(aq2ter_nodes_orig, node_name)) %>% pull(name) %>% as.character()), breaks = as.character(col_palette[1:length(aq2ter_nodes_orig)]), guide = "legend") +
   scale_shape_manual(values = c("*" = 8, "NS" = 19)) +
   ylim(c(0, 100)) +
-  theme_bw(base_size = 14) +
+  theme_bw(base_size = 14, base_family = "sans") +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), legend.position = "bottom") +
   labs(
     x = "Relative node position (Root --> Tips)",
     y = "% present",
-    colour = "Taxonomy of transition node"
-  )
+    colour = ""
+  ) + 
+  guides(colour = guide_legend(nrow = 3, byrow = TRUE))
 
 f5a
 
 ####Get the multicellularity transition nodes####
-load("data/20250428_cellularity_anc_reconstruction.simmap")
+load("data/20260722_cellularity_anc_reconstruction.simmap")
 
 cellularity_anc_summary <- summary(cell_anc)
 
@@ -458,7 +467,7 @@ nodes_posn_tbl <- rbind(
     select(-rn)
 ) %>% 
   rowwise() %>% 
-  mutate(node_height = nodeheight(tt_dendo, nodes)) %>% 
+  mutate(node_height = nodeheight(species_tree, nodes)) %>% 
   ungroup() %>% 
   group_by(lineage) %>% 
   arrange(node_height, .by_group = T) %>% 
@@ -478,8 +487,11 @@ nodes_posn_tbl <- nodes_posn_tbl %>%
   rowwise() %>% 
   mutate(
     rel_posn = case_when(
-      node_height <= midpoint ~ node_height/midpoint/2,
-      node_height > midpoint ~ scales::rescale(node_height, to = c(0.5, 1), from = c(midpoint, max_val)))
+      as.numeric(nodes) <= Ntip(species_tree) ~ 1,
+      node_height < midpoint ~ scales::rescale(node_height, to = c(0, 0.5), from = c(min_val, midpoint)),
+      node_height > midpoint ~ scales::rescale(node_height, to = c(0.5, 1), from = c(midpoint, max_val)),
+      node_height == midpoint ~ 0.5
+    )
   ) %>% 
   ungroup() %>% 
   select(-midpoint, -min_val, -max_val)

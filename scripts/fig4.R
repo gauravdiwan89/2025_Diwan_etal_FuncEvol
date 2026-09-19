@@ -8,12 +8,12 @@ library(simona)
 library(simplifyEnrichment)
 
 ###First restore the database available here - https://russelllab.org/funcevol/ using the pg_restore command
-con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_pub", bigint = "integer")
+con <- dbConnect(drv = RPostgres::Postgres(), dbname = "orthologs_revision", bigint = "integer")
 
-species_tree <- read.tree("data/species_tree_cleaned_final.nwk")
+species_tree <- sptree_revised <- read.tree("data/species_tree_cleaned_final.nwk")
 species_details <- read_tsv("data/TableS1.tsv")
 major_clades <- read_tsv("data/TableS2.tsv")
-go_obo <- ontologyIndex::get_ontology(file = "data/go-basic.obo", propagate_relationships = c("is_a", "part_of"))
+# go_obo <- ontologyIndex::get_ontology(file = "data/go-basic.obo", propagate_relationships = c("is_a", "part_of"))
 
 full_go_lineage <- function(term, go_obo) {
   xx <- unlist(go_obo$name[unlist(go_obo$ancestors[go_obo$id[match(term, go_obo$name)]])])
@@ -23,12 +23,13 @@ full_go_lineage <- function(term, go_obo) {
 
 ###Fig 4B-C####
 
-euk_tree <- keep.tip(read.newick("data/species_tree_for_Count.nwk"), species_details$tree_tip_label[species_details$superkingdom == "Eukaryota"])
+euk_tree <- keep.tip(sptree_revised, species_details$tree_tip_label[species_details$superkingdom == "Eukaryota"])
 
 ####Get the terrestrial transition nodes####
-load("data/20250514_habitat_anc_reconstruction.simmap")
+load("data/20260722_habitat_anc_reconstruction.simmap")
 
 habitat_anc_summary <- summary(habitat_anc)
+
 ace_matrix <- habitat_anc_summary$ace
 
 habitat_transitions <- euk_tree$edge %>% 
@@ -132,19 +133,22 @@ for(x in aq2ter_nodes_orig) {
 aq2ter_go_bp_term <- tbl(con, "og_gains_losses_parsimony") %>% 
   pivot_longer(cols = c(gain_nodes, gain_tips), names_to = "gain_type", values_to = "node") %>% 
   mutate(node = sql("unnest(string_to_array(node, ', '))")) %>% 
-  filter(node %in% !!c(aq2ter_nodes_orig, unique(unlist(aq2ter_all_parents)))) %>% 
-  left_join(tbl(con, "ptns_og_phylo"), by = join_by(HOG)) %>% 
+  # filter(node %in% !!c(aq2ter_nodes_orig)) %>% 
+  filter(node %in% !!c(aq2ter_nodes_orig, unique(unlist(aq2ter_all_parents)))) %>%
+  left_join(tbl(con, "ptns_og_phylo") %>% select(HOG, org, uniprot_acc:gene_desc), by = join_by(HOG)) %>% 
   inner_join({
     tbl(con, "orthologs_gains_losses_parsimony") %>% 
       pivot_longer(cols = c(gain_nodes, gain_tips), names_to = "gain_type", values_to = "node") %>% 
       mutate(node = sql("unnest(string_to_array(node, ', '))")) %>% 
-      filter(node %in% !!c(aq2ter_nodes_orig, unique(unlist(aq2ter_all_parents)))) %>% 
+      filter(node %in% !!c(aq2ter_nodes_orig, unique(unlist(aq2ter_all_parents)))) %>%
+      # filter(node %in% !!c(aq2ter_nodes_orig)) %>% 
       distinct(uniprot_acc, node)
   }) %>% 
-  left_join(tbl(con, "ptns_go_bp")) %>% 
-  select(-level, -matches("l\\d+")) %>% 
-  dplyr::rename(value = BP) %>% 
-  filter(!is.na(value)) %>% 
+  inner_join(tbl(con, "ptns_go_bp") %>% select(uniprot_acc, bp, term = go_id) %>% dplyr::rename(value = bp)) %>% 
+  # select(-level, -matches("l\\d+")) %>% 
+  # dplyr::rename(value = bp) %>% 
+  # filter(!is.na(value)) %>% 
+  distinct() %>% 
   collect() %>% 
   group_by(node) %>% 
   filter(
@@ -152,7 +156,7 @@ aq2ter_go_bp_term <- tbl(con, "og_gains_losses_parsimony") %>%
       all(node %in% aq2ter_nodes_orig) ~ (
         org %in% (
           habitat_species %>% 
-            filter(OSCODE %in% species_tree$tip.label[getDescendants(species_tree, node = unique(node))]) %>% 
+            filter(OSCODE %in% sptree_revised$tip.label[getDescendants(sptree_revised, node = unique(node))]) %>% 
             filter(habitat == "Terrestrial") %>% 
             pull(OSCODE)
         )
@@ -162,13 +166,26 @@ aq2ter_go_bp_term <- tbl(con, "og_gains_losses_parsimony") %>%
   ) %>% 
   ungroup()
 
-write_tsv(aq2ter_go_bp_term, "data/20251113_aq2ter_bp_terms_by_group.tsv.gz")
+write_tsv(aq2ter_go_bp_term, "data/20260723_aq2ter_bp_terms_by_group.tsv.gz")
 
 source("scripts/fishers_test_fast.R")
 
-run_fast_fishers(infile = "data/20251113_aq2ter_bp_terms_by_group.tsv.gz", outfile = "data/20251113_aq2ter_fisher_test_results_bp.csv.gz")
+infile = "data/20260723_aq2ter_bp_terms_by_group.tsv.gz"
+outfile = "data/20260723_aq2ter_fisher_test_results_bp.csv.gz"
+require(data.table)
+data <- fread(infile)
 
-aq2ter_go_bp_term_test <- read_csv("data/20251113_aq2ter_fisher_test_results_bp.csv.gz", col_names = c(
+# Step 2: Create mappings of nodes to orthogroups and GO terms to orthogroups
+node_to_orthogroups <- data %>% distinct(HOG, node) %>% with(., split(HOG, node))
+go_to_orthogroups <- data %>% distinct(HOG, value) %>% with(., split(HOG, value))
+node_to_go <- data %>% distinct(value, node) %>% with(., split(value, node))
+cat("Mappings created...\n")
+
+# Get all unique orthogroups
+all_orthogroups <- unique(data$HOG)
+run_fast_fishers(infile = infile, outfile = outfile)
+
+aq2ter_go_bp_term_test <- read_csv("data/20260723_aq2ter_fisher_test_results_bp.csv.gz", col_names = c(
   "node",
   "value",
   "has_term_at_node",
@@ -191,42 +208,38 @@ for(i in 1:length(aq2ter_nodes_orig)) {
     pull(value) %>% 
     unique()
   
-  parent_func <- aq2ter_go_bp_term_sig %>% 
-    filter(node == aq2ter_nodes_parents[i]) %>% 
-    pull(value) %>% 
-    unique()
-  
-  row_add <- tibble(node = aq2ter_nodes_orig[i], name = major_clades$name[major_clades$node == node], gained_func = desc_func)
+  row_add <- tibble(node = aq2ter_nodes_orig[i], name = major_clades$name[major_clades$node_name == node], gained_func = desc_func)
   
   gained_func_term_tbl <- rbind(gained_func_term_tbl, row_add)
 }
 
 gained_func_term_tbl <- gained_func_term_tbl %>% 
   inner_join(aq2ter_go_bp_term_test, by = join_by(node, gained_func == value)) %>% 
-  mutate(parents = map(gained_func, function(x) full_go_lineage(term = x, go_obo = go_obo))) %>% 
   unnest()
 
 annotation_tbl <- tbl(con, "ptns_go_bp") %>%
-    select(uniprot_acc, term = BP) %>%
-    filter(term %in% !!gained_func_term_tbl$gained_func, uniprot_acc %in% !!unique(aq2ter_go_bp_term$uniprot_acc)) %>%
-    inner_join(
-      (tbl(con, "orthologs_gains_losses_parsimony") %>%
-         pivot_longer(cols = c(gain_nodes, gain_tips), names_to = "gain_type", values_to = "node") %>%
-         mutate(node = sql("unnest(string_to_array(node, ', '))")) %>%
-         filter(node %in% !!c(aq2ter_nodes_orig)) %>%
-         distinct(uniprot_acc))
-    ) %>%
-    distinct(uniprot_acc, term) %>%
-    collect()
+  select(uniprot_acc, go_id, term = bp) %>%
+  filter(term %in% !!gained_func_term_tbl$gained_func) %>%
+  inner_join(
+    (tbl(con, "orthologs_gains_losses_parsimony") %>%
+       pivot_longer(cols = c(gain_nodes, gain_tips), names_to = "gain_type", values_to = "node") %>%
+       mutate(node = sql("unnest(string_to_array(node, ', '))")) %>%
+       filter(node %in% !!c(aq2ter_nodes_orig)) %>%
+       select(uniprot_acc))
+  ) %>%
+  collect() %>%
+  distinct()
 
-annotation_tbl <- annotation_tbl %>%
-  mutate(go_id = names(go_obo$name)[match(term, go_obo$name)])
 annotation_list <- annotation_tbl %>%
   with(., split(uniprot_acc, factor(go_id, levels = unique(go_id))))
-dag <- import_obo("data/go-basic.obo", relation_type = c("is_a", "part_of"), annotation = annotation_list)
+require(simona)
+dag <- import_obo("data/go.obo", relation_type = c("is_a", "part_of"), annotation = annotation_list)
 all_terms <- unique(annotation_tbl$go_id)
 all_terms_go <- all_terms[!is.na(all_terms)]
 all_terms_sim <- term_sim(dag = dag, terms = all_terms_go, method = "Sim_Lin_1998")
+all_terms_IC <- term_IC(dag = dag, method = "IC_offspring")
+
+require(simplifyEnrichment)
 all_terms_sim_clustered <- cluster_terms(all_terms_sim, method = "louvain", control = list(resolution = 1))
 
 all_terms_sim_clustered_dist <- annotation_tbl %>%
@@ -285,11 +298,15 @@ aq2ter_go_bp_odds_tbl_kw_cands <- gained_func_term_tbl2 %>%
   ungroup() %>% 
   group_by(go_cluster, parent_terms) %>% 
   summarize(n_pt = n(), n_go = unique(n_go), prop = n_pt/n_go, .groups = "drop") %>% 
-  arrange(go_cluster, desc(prop))
+  arrange(go_cluster, desc(prop)) %>% 
+  mutate(IC = all_terms_IC[go_obo$id[match(parent_terms, go_obo$name)]]) %>% 
+  group_by(go_cluster) %>%
+  ungroup()
 
 aq2ter_go_bp_kw_cands_final <- aq2ter_go_bp_odds_tbl_kw_cands %>% 
   filter(prop > 0.5) %>% 
-  group_by(go_cluster) %>% 
+  group_by(go_cluster) %>%
+  mutate(rel_IC = IC/max(IC)) %>% 
   do({
     sub_tbl <- .
     
@@ -313,41 +330,78 @@ go_bp_odds_tbl <- gained_func_term_tbl2 %>%
     suffix = c("_gained", "_parent")
   )
 
-go_bp_odds_plot_tbl <- go_bp_odds_tbl %>% 
-  group_by(node, name, keywords) %>% 
-  summarize(
-    `Parent Nodes.mean_odds` = mean(log2(odds_ratio_parent), na.rm = T), 
-    `Parent Nodes.sd_odds` = sd(log2(odds_ratio_parent), na.rm = T), 
-    `Transition Node.mean_odds` = mean(log2(odds_ratio_gained), na.rm = T), 
-    `Transition Node.sd_odds` = sd(log2(odds_ratio_gained), na.rm = T), 
-    t_value = tryCatch({t.test(odds_ratio_gained, odds_ratio_parent, alternative = "greater", na.rm = T)$statistic}, error = function(e){return (NA_real_)}), 
-    p_value = tryCatch({t.test(odds_ratio_gained, odds_ratio_parent, alternative = "greater", na.rm = T)$p.value}, error = function(e){return (NA_real_)}), 
-    .groups = "drop"
-  ) %>% 
-  pivot_longer(`Parent Nodes.mean_odds`:`Transition Node.sd_odds`, names_to = "desc") %>% 
-  separate(desc, into = c("group", "statistic"), sep = "[.]") %>% 
-  pivot_wider(names_from = statistic, values_from = value) %>% 
-  mutate(col_cat = col_palette[node]) %>% 
-  mutate(GO = "BP") %>% 
-  mutate(sig = if_else(p_value < 0.05 & group == "Transition Node", "*", ""))
+f4b1 <- gained_func_term_tbl2 %>% 
+  inner_join(aq2ter_go_bp_kw_cands_final %>% select(go_cluster, keywords = parent_terms, prop)) %>% 
+  group_by(node, name, keywords, prop) %>% 
+  summarize(mean_log2_odds_ratio = mean(log2(odds_ratio), na.rm = T), .groups = "drop") %>% 
+  group_by(keywords) %>% 
+  mutate(sum_or = sum(mean_log2_odds_ratio, na.rm = T), label = str_wrap(paste0(keywords, "(", round(prop*100, 1), "%)"), 20)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = name, y = fct_reorder(label, sum_or), fill = mean_log2_odds_ratio)) +
+  geom_tile() +
+  scale_fill_viridis_c(limits = c(1, NA)) +
+  theme_bw(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), legend.position = "bottom", legend.direction = "horizontal") +
+  labs(x = "Transition node", y = "MICA (% terms parent to)", fill = "Mean Log2 Odds Ratio")
 
-fig4b <- go_bp_odds_plot_tbl %>% 
-  mutate(keywords = gsub("[|]", "", keywords)) %>% 
-  ggplot() +
-  geom_errorbar(aes(x = group, ymin = mean_odds-sd_odds, ymax = mean_odds+sd_odds, colour = col_cat), linewidth = 0.3, width = 0.2) + 
-  geom_line(aes(x = group, y = mean_odds, colour = col_cat, group = col_cat), linewidth = 1.5) +
-  geom_point(aes(x = group, y = mean_odds, colour = col_cat), size = 3) +
-  geom_text(aes(x = group, y = mean_odds, label = sig, group = col_cat, colour = col_cat), hjust = -0.2, size = 12) +
-  scale_colour_identity(labels = (major_clades %>% dplyr::slice(match(aq2ter_nodes_orig, node)) %>% pull(name)), breaks = col_palette[1:length(aq2ter_nodes_orig)], guide = "none") +
-  facet_grid(rows = vars(GO), cols = vars(keywords), labeller = labeller(keywords = label_wrap_gen(width = 10)), scales = "free") +
+sf7a <- gained_func_term_tbl2 %>% 
+  inner_join(uni2multi_go_bp_kw_cands_final %>% select(go_cluster, keywords = parent_terms)) %>% 
+  group_by(gained_func) %>%
+  filter(n_distinct(name) > 1) %>% 
+  mutate(sum_or = sum(log2(odds_ratio), na.rm = T)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = name, y = fct_reorder(gained_func, sum_or), fill = log2(odds_ratio))) +
+  geom_tile() +
+  scale_fill_viridis_c() +
   theme_bw(base_size = 14) +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
-  labs(x = "", y = "Mean Log2 Odds Ratio")
+  labs(x = "Transition node", y = "GO term", fill = "Log2 Odds Ratio")
 
-fig4b
+##fig4b2
+# ptns_gained_at_trans <- tbl(con, "orthologs_gains_losses_parsimony") %>% 
+#   pivot_longer(cols = c(gain_nodes, gain_tips), names_to = "gain_type", values_to = "node") %>% 
+#   mutate(node = sql("unnest(string_to_array(node, ', '))")) %>% 
+#   filter(node %in% !!c(aq2ter_nodes_orig)) %>% 
+#   distinct(uniprot_acc) %>% 
+#   pull()
+
+# terms_oi <- go_bp_odds_tbl %>% 
+#   distinct(node, name, gained_func, keywords)
+
+aq2ter_go_bp_term <- read_tsv("data/20260723_aq2ter_bp_terms_by_group.tsv.gz")
+
+# ptn_oi <- aq2ter_go_bp_term %>% 
+#   filter(node %in% aq2ter_nodes_orig, uniprot_acc %in% ptns_gained_at_trans) %>% 
+#   inner_join(terms_oi %>% mutate(node = as.numeric(node)), join_by(node, value == gained_func)) %>% 
+#   distinct(node, name, uniprot_acc, HOG, value, keywords)
+# 
+# export_tbl <- tbl(con, "ptns_og_phylo") %>% 
+#   inner_join(ptn_oi, join_by(uniprot_acc, HOG), copy = T) %>% 
+#   filter(gene_desc != "Uncharacterized protein") %>%
+#   collect() %>% 
+#   arrange(keywords, node, org, value, gene_desc) %>% 
+#   left_join(aq2ter_go_bp_kw_cands_final %>% select(keywords = parent_terms, prop_go_terms_w_cluster_name = prop)) %>%
+#   select(lineage = node, lineage_name = name, cluster_name = keywords, gained_func = value, gene_name, uniprot_acc, org, gene_desc, HOG) %>% 
+#   distinct()
+
+# export_tbl %>% 
+#   write_tsv("data/TableS6.tsv.gz")
+
+library(treemap)
+export_tbl <- read_tsv("data/TableS6.tsv.gz")
+
+stuff <- export_tbl %>% 
+  group_by(cluster_name, gained_func) %>% 
+  summarize(n_hogs = n_distinct(HOG)) %>% 
+  group_by(cluster_name) %>% 
+  mutate(prop_hogs = n_hogs/max(n_hogs)) %>% 
+  ungroup() %>% 
+  filter(prop_hogs > 0.1)
+
+treemap(dtf = stuff, index = c("cluster_name", "gained_func"), vSize = "prop_hogs", type = "categorical", vColor = "cluster_name", inflate.labels = F, lowerbound.cex.labels = 0, bg.labels = "#CCCCCCD9", fontcolor.labels = c("#34449c", "black"), border.lwds = c(1, 0.5), position.legend = "none", force.print.labels = T, title = "", aspRatio = 0.5, overlap.labels = 1, fontfamily.labels = "sans", palette = "Pastel2")
 
 ####Get the multicellularity transition nodes####
-load("data/20250428_cellularity_anc_reconstruction.simmap")
+load("data/20260722_cellularity_anc_reconstruction.simmap")
 
 cellularity_anc_summary <- summary(cell_anc)
 
@@ -445,7 +499,7 @@ uni2multi_go_cc_term <- tbl(con, "og_gains_losses_parsimony") %>%
   pivot_longer(cols = c(gain_nodes, gain_tips), names_to = "gain_type", values_to = "node") %>% 
   mutate(node = sql("unnest(string_to_array(node, ', '))")) %>% 
   filter(node %in% !!c(uni2multi_nodes_orig, unique(unlist(uni2multi_all_parents)))) %>% 
-  left_join(tbl(con, "ptns_og_phylo"), by = join_by(HOG)) %>% 
+  left_join(tbl(con, "ptns_og_phylo") %>% select(HOG, org, uniprot_acc:gene_desc), by = join_by(HOG)) %>% 
   inner_join({
     tbl(con, "orthologs_gains_losses_parsimony") %>% 
       pivot_longer(cols = c(gain_nodes, gain_tips), names_to = "gain_type", values_to = "node") %>% 
@@ -453,10 +507,8 @@ uni2multi_go_cc_term <- tbl(con, "og_gains_losses_parsimony") %>%
       filter(node %in% !!c(uni2multi_nodes_orig, unique(unlist(uni2multi_all_parents)))) %>% 
       distinct(uniprot_acc, node)
   }) %>% 
-  left_join(tbl(con, "ptns_go_cc")) %>% 
-  select(-level, -matches("l\\d+")) %>% 
-  dplyr::rename(value = CC) %>% 
-  filter(!is.na(value)) %>% 
+  inner_join(tbl(con, "ptns_go_cc") %>% select(uniprot_acc, cc) %>% dplyr::rename(value = cc)) %>% 
+  distinct() %>% 
   collect() %>% 
   group_by(node) %>% 
   filter(
@@ -464,7 +516,7 @@ uni2multi_go_cc_term <- tbl(con, "og_gains_losses_parsimony") %>%
       all(node %in% uni2multi_nodes_orig) ~ (
         org %in% (
           euk_cell %>% 
-            filter(OSCODE %in% species_tree$tip.label[getDescendants(species_tree, node = unique(node))]) %>% 
+            filter(OSCODE %in% sptree_revised$tip.label[getDescendants(sptree_revised, node = unique(node))]) %>% 
             filter(cellularity == "Multicellular") %>% 
             pull(OSCODE)
         )
@@ -474,13 +526,26 @@ uni2multi_go_cc_term <- tbl(con, "og_gains_losses_parsimony") %>%
   ) %>% 
   ungroup()
 
-write_tsv(uni2multi_go_cc_term, "data/20251113_uni2multi_cc_terms_by_group.tsv.gz")
+write_tsv(uni2multi_go_cc_term, "data/20260824_uni2multi_cc_terms_by_group.tsv.gz")
 
 source("scripts/fishers_test_fast.R")
+infile = "data/20260824_uni2multi_cc_terms_by_group.tsv.gz"
+outfile = "data/20260824_uni2multi_fisher_test_results_cc.csv.gz"
 
-run_fast_fishers(infile = "data/20251113_uni2multi_cc_terms_by_group.tsv.gz", outfile = "data/20251113_uni2multi_fisher_test_results_cc.csv.gz")
+require(data.table)
+data <- fread(infile)
 
-uni2multi_go_cc_term_test <- read_csv("data/20251113_uni2multi_fisher_test_results_cc.csv.gz", col_names = c(
+# Step 2: Create mappings of nodes to orthogroups and GO terms to orthogroups
+node_to_orthogroups <- data %>% distinct(HOG, node) %>% with(., split(HOG, node))
+go_to_orthogroups <- data %>% distinct(HOG, value) %>% with(., split(HOG, value))
+node_to_go <- data %>% distinct(value, node) %>% with(., split(value, node))
+cat("Mappings created...\n")
+
+# Get all unique orthogroups
+all_orthogroups <- unique(data$HOG)
+run_fast_fishers(infile = infile, outfile = outfile)
+
+uni2multi_go_cc_term_test <- read_csv("data/20260824_uni2multi_fisher_test_results_cc.csv.gz", col_names = c(
   "node",
   "value",
   "has_term_at_node",
@@ -503,43 +568,37 @@ for(i in 1:length(uni2multi_nodes_orig)) {
     pull(value) %>% 
     unique()
   
-  parent_func <- uni2multi_go_cc_term_sig %>% 
-    filter(node == uni2multi_nodes_parents[i]) %>% 
-    pull(value) %>% 
-    unique()
-  
-  row_add <- tibble(node = uni2multi_nodes_orig[i], name = major_clades$name[major_clades$node == node], gained_func = desc_func)
+  row_add <- tibble(node = uni2multi_nodes_orig[i], name = major_clades$name[major_clades$node_name == node], gained_func = desc_func)
   
   gained_func_term_tbl <- rbind(gained_func_term_tbl, row_add)
 }
 
 gained_func_term_tbl <- gained_func_term_tbl %>% 
   inner_join(uni2multi_go_cc_term_test, by = join_by(node, gained_func == value)) %>% 
-  mutate(parents = map(gained_func, function(x) full_go_lineage(term = x, go_obo = go_obo))) %>% 
   unnest()
 
-annotation_tbl <- tbl(con, "ptns_go_cc") %>%
-  select(uniprot_acc, term = CC) %>%
-  filter(term %in% !!gained_func_term_tbl$gained_func, uniprot_acc %in% !!unique(uni2multi_go_cc_term$uniprot_acc)) %>%
+annotation_tbl <- tbl(con, "orthologs_gains_losses_parsimony") %>%
+  pivot_longer(cols = c(gain_nodes, gain_tips), names_to = "gain_type", values_to = "node") %>%
+  mutate(node = sql("unnest(string_to_array(node, ', '))")) %>%
+  filter(node %in% !!c(uni2multi_nodes_orig)) %>%
+  distinct(uniprot_acc) %>%
   inner_join(
-    (tbl(con, "orthologs_gains_losses_parsimony") %>%
-       pivot_longer(cols = c(gain_nodes, gain_tips), names_to = "gain_type", values_to = "node") %>%
-       mutate(node = sql("unnest(string_to_array(node, ', '))")) %>%
-       filter(node %in% !!c(uni2multi_nodes_orig)) %>%
-       distinct(uniprot_acc))
+    (tbl(con, "ptns_go_cc") %>%
+       select(uniprot_acc, go_id, term = cc) %>%
+       filter(term %in% !!gained_func_term_tbl$gained_func))
   ) %>%
-  distinct(uniprot_acc, term) %>%
+  distinct(uniprot_acc, go_id, term) %>%
   collect()
 
-annotation_tbl <- annotation_tbl %>%
-  mutate(go_id = names(go_obo$name)[match(term, go_obo$name)])
 annotation_list <- annotation_tbl %>%
   with(., split(uniprot_acc, factor(go_id, levels = unique(go_id))))
-dag <- import_obo("data/go-basic.obo", relation_type = c("is_a", "part_of"), annotation = annotation_list)
+dag <- import_obo("/net/home.isilon/ds-russell/GO/go.obo", relation_type = c("is_a", "part_of"), annotation = annotation_list)
 all_terms <- unique(annotation_tbl$go_id)
 all_terms_go <- all_terms[!is.na(all_terms)]
 all_terms_sim <- term_sim(dag = dag, terms = all_terms_go, method = "Sim_Lin_1998")
+require(simplifyEnrichment)
 all_terms_sim_clustered <- cluster_terms(all_terms_sim, method = "louvain", control = list(resolution = 1))
+all_terms_IC <- term_IC(dag = dag, method = "IC_offspring")
 
 all_terms_sim_clustered_dist <- annotation_tbl %>%
   filter(!is.na(go_id)) %>%
@@ -597,11 +656,13 @@ uni2multi_go_cc_odds_tbl_kw_cands <- gained_func_term_tbl2 %>%
   ungroup() %>% 
   group_by(go_cluster, parent_terms) %>% 
   summarize(n_pt = n(), n_go = unique(n_go), prop = n_pt/n_go, .groups = "drop") %>% 
-  arrange(go_cluster, desc(prop))
+  arrange(go_cluster, desc(prop)) %>% 
+  mutate(IC = all_terms_IC[go_obo$id[match(parent_terms, go_obo$name)]])
 
 uni2multi_go_cc_kw_cands_final <- uni2multi_go_cc_odds_tbl_kw_cands %>% 
   filter(prop > 0.5) %>% 
-  group_by(go_cluster) %>% 
+  group_by(go_cluster) %>%
+  mutate(rel_IC = IC/max(IC)) %>% 
   do({
     sub_tbl <- .
     
@@ -614,7 +675,7 @@ go_cc_odds_tbl <- gained_func_term_tbl2 %>%
   group_by(go_cluster) %>% 
   filter(n_distinct(gained_func) > 2) %>% 
   ungroup() %>% 
-  inner_join(uni2multi_go_cc_kw_cands_final %>% select(go_cluster, keywords = parent_terms)) %>% 
+  inner_join(uni2multi_go_cc_kw_cands_final %>% select(go_cluster, keywords = parent_terms, prop)) %>% 
   left_join(
     parents_func_term_tbl2 %>% 
       group_by(go_cluster) %>% 
@@ -625,35 +686,73 @@ go_cc_odds_tbl <- gained_func_term_tbl2 %>%
     suffix = c("_gained", "_parent")
   )
 
-go_cc_odds_plot_tbl <- go_cc_odds_tbl %>% 
-  group_by(node, name, keywords) %>% 
-  summarize(
-    `Parent Nodes.mean_odds` = mean(log2(odds_ratio_parent), na.rm = T), 
-    `Parent Nodes.sd_odds` = sd(log2(odds_ratio_parent), na.rm = T), 
-    `Transition Node.mean_odds` = mean(log2(odds_ratio_gained), na.rm = T), 
-    `Transition Node.sd_odds` = sd(log2(odds_ratio_gained), na.rm = T), 
-    t_value = tryCatch({t.test(odds_ratio_gained, odds_ratio_parent, alternative = "greater", na.rm = T)$statistic}, error = function(e){return (NA_real_)}), 
-    p_value = tryCatch({t.test(odds_ratio_gained, odds_ratio_parent, alternative = "greater", na.rm = T)$p.value}, error = function(e){return (NA_real_)}), 
-    .groups = "drop"
-  ) %>% 
-  pivot_longer(`Parent Nodes.mean_odds`:`Transition Node.sd_odds`, names_to = "desc") %>% 
-  separate(desc, into = c("group", "statistic"), sep = "[.]") %>% 
-  pivot_wider(names_from = statistic, values_from = value) %>% 
-  mutate(col_cat = col_palette[node]) %>% 
-  mutate(GO = "CC") %>% 
-  mutate(sig = if_else(p_value < 0.05 & group == "Transition Node", "*", ""))
+f4c1 <- gained_func_term_tbl2 %>% 
+  inner_join(uni2multi_go_cc_kw_cands_final %>% select(go_cluster, keywords = parent_terms, prop)) %>% 
+  group_by(node, name, keywords, prop) %>% 
+  summarize(mean_log2_odds_ratio = mean(log2(odds_ratio), na.rm = T), .groups = "drop") %>% 
+  group_by(keywords) %>% 
+  mutate(sum_or = sum(mean_log2_odds_ratio, na.rm = T), label = str_wrap(paste0(keywords, "(", round(prop*100, 1), "%)"), 20)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = name, y = fct_reorder(label, sum_or), fill = mean_log2_odds_ratio)) +
+  geom_tile() +
+  scale_fill_viridis_c(limits = c(1, NA)) +
+  theme_bw(base_size = 14) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5), legend.position = "bottom", legend.direction = "horizontal") +
+  labs(x = "Transition node", y = "MICA (% of terms parent to)", fill = "Mean Log2 Odds Ratio")
 
-fig4c <- go_cc_odds_plot_tbl %>% 
-  mutate(keywords = gsub("[|]", "", keywords)) %>% 
-  ggplot() +
-  geom_errorbar(aes(x = group, ymin = mean_odds-sd_odds, ymax = mean_odds+sd_odds, colour = col_cat), linewidth = 0.3, width = 0.2) + 
-  geom_line(aes(x = group, y = mean_odds, colour = col_cat, group = col_cat), linewidth = 1.5) +
-  geom_point(aes(x = group, y = mean_odds, colour = col_cat), size = 3) +
-  geom_text(aes(x = group, y = mean_odds, label = sig, group = col_cat, colour = col_cat), hjust = -0.2, size = 12) +
-  scale_colour_identity(labels = (major_clades %>% dplyr::slice(match(uni2multi_nodes_orig, node)) %>% pull(name)), breaks = col_palette[1:length(uni2multi_nodes_orig)], guide = "none") +
-  facet_grid(rows = vars(GO), cols = vars(keywords), labeller = labeller(keywords = label_wrap_gen(width = 10)), scales = "free") +
+sf7b <- gained_func_term_tbl2 %>% 
+  inner_join(uni2multi_go_cc_kw_cands_final %>% select(go_cluster, keywords = parent_terms)) %>% 
+  group_by(gained_func) %>%
+  filter(n_distinct(name) > 1) %>% 
+  mutate(sum_or = sum(log2(odds_ratio), na.rm = T)) %>% 
+  ungroup() %>% 
+  # summarize(mean_log2_odds_ratio = mean(log2(odds_ratio), na.rm = T), .groups = "drop") %>% 
+  ggplot(aes(x = name, y = fct_reorder(gained_func, sum_or), fill = log2(odds_ratio))) +
+  geom_tile() +
+  scale_fill_viridis_c() +
   theme_bw(base_size = 14) +
   theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
-  labs(x = "", y = "Mean Log2 Odds Ratio")
+  labs(x = "Transition node", y = "GO term", fill = "Log2 Odds Ratio")
 
-fig4c
+# ptns_gained_at_trans <- tbl(con, "orthologs_gains_losses_parsimony") %>% 
+#   pivot_longer(cols = c(gain_nodes, gain_tips), names_to = "gain_type", values_to = "node") %>% 
+#   mutate(node = sql("unnest(string_to_array(node, ', '))")) %>% 
+#   filter(node %in% !!c(uni2multi_nodes_orig)) %>% 
+#   distinct(uniprot_acc) %>% 
+#   pull()
+# 
+# terms_oi <- go_cc_odds_tbl %>% 
+#   distinct(node, name, gained_func, keywords)
+
+uni2multi_go_cc_term <-  read_tsv("main_set/analysis/revised_tree/20260824_uni2multi_cc_terms_by_group.tsv.gz")
+# ptn_oi <- uni2multi_go_cc_term %>% 
+#   filter(node %in% uni2multi_nodes_orig, uniprot_acc %in% ptns_gained_at_trans) %>% 
+#   inner_join(terms_oi %>% mutate(node = as.numeric(node)), join_by(node, value == gained_func)) %>% 
+#   distinct(node, name, uniprot_acc, HOG, value, keywords)
+
+# export_tbl <- tbl(con, "ptns_og_phylo") %>% 
+#   inner_join(ptn_oi, join_by(uniprot_acc, HOG), copy = T) %>% 
+#   filter(gene_desc != "Uncharacterized protein") %>% 
+#   collect() %>% 
+#   # left_join(all_terms_sim_clustered_dist %>% select(term, avg_dist_to_others), join_by(value == term)) %>% 
+#   arrange(keywords, node, org, value, gene_desc) %>% 
+#   left_join(uni2multi_go_cc_kw_cands_final %>% select(keywords = parent_terms, prop_go_terms_w_cluster_name = prop)) %>% 
+#   select(lineage = node, lineage_name = name, cluster_name = keywords, prop_go_terms_w_cluster_name, gained_func = value, gene_name, uniprot_acc, org, gene_desc, HOG) %>% 
+#   distinct()
+# 
+# export_tbl %>% 
+#   write_tsv("data/TableS8.tsv.gz")
+
+library(treemap)
+
+export_tbl <- read_tsv("data/TableS8.tsv.gz")
+
+stuff <- export_tbl %>% 
+  group_by(cluster_name, gained_func) %>% 
+  summarize(n_hogs = n_distinct(HOG)) %>% 
+  group_by(cluster_name) %>% 
+  mutate(prop_hogs = n_hogs/sum(n_hogs)) %>% 
+  ungroup() %>% 
+  filter(prop_hogs > 0.01)
+
+treemap(dtf = stuff, index = c("cluster_name", "gained_func"), vSize = "prop_hogs", type = "categorical", vColor = "cluster_name", inflate.labels = F, lowerbound.cex.labels = 0, bg.labels = "#CCCCCCD9", fontcolor.labels = c("#34449c", "black"), border.lwds = c(1, 0.5), position.legend = "none", force.print.labels = T, title = "", aspRatio = 0.5, overlap.labels = 1, fontfamily.labels = "sans", palette = "Pastel2")

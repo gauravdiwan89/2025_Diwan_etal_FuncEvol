@@ -6,16 +6,14 @@ library(ggtree)
 species_details <- read_tsv("data/TableS1.tsv")
 tables2 <- read_tsv("data/TableS2.tsv")
 species_tree <- read.tree("data/species_tree_cleaned_final.nwk")
-phylum_tree_final <- read.tree("data/20250508_Phylum_Tree_for_Figure_1.nwk")
+phylum_tree_final <- read.tree("data/20260728_Phylum_Tree_for_Figure_1.nwk")
 
 ###Change tip labels for phylum tree in fig1####
 orig_ph_tree_tips <- phylum_tree_final$tip.label
 
 ph_tree_tips <- species_details$phylum[match(phylum_tree_final$tip.label, species_details$tree_tip_label)]
+ph_tree_tips[which(ph_tree_tips == "Proteobacteria")] <- species_details$class[match(phylum_tree_final$tip.label[which(ph_tree_tips == "Proteobacteria")], species_details$tree_tip_label)]
 ph_tree_tips[is.na(ph_tree_tips)] <- species_details$family[match(phylum_tree_final$tip.label[is.na(ph_tree_tips)], species_details$tree_tip_label)]
-
-species_details_longer <- species_details %>% 
-  pivot_longer(cols = phylum:family, names_to = "taxon")
 
 tips_split <- split(orig_ph_tree_tips, ph_tree_tips)
 
@@ -24,6 +22,10 @@ ph_tree_clades <- sapply(tips_split[sapply(tips_split, length) > 1], function(x)
 ph_tree_tips[ph_tree_tips %in% names(ph_tree_clades)] <- ""
 
 ph_tree_clade_labs <- ph_tree_clades %>% enframe() %>% dplyr::rename(clade = name, node = value)
+
+#Add numbers to the labels
+species_details_longer <- species_details %>% 
+  pivot_longer(cols = phylum:family, names_to = "taxon")
 
 ph_tree_tips[ph_tree_tips != ""] <- paste0(ph_tree_tips[ph_tree_tips != ""], " (", sapply(ph_tree_tips[ph_tree_tips != ""], function(x) {
   
@@ -45,6 +47,13 @@ ph_tree_tips[ph_tree_tips != ""] <- paste0(ph_tree_tips[ph_tree_tips != ""], " (
       filter(value %in% c(ph_tree_tips, ph_tree_clade_labs$clade)) %>% 
       nrow()
   )
+  
+  # 
+  # if(x == "Euryarchaeota") {
+  #   xx <- sum(species_details_longer$value == x, na.rm = T) - sum(species_details_longer$value == "Halobacteria", na.rm = T)
+  # } else {
+  #   xx <- sum(species_details_longer$value == x, na.rm = T)
+  # }
   xx
 }), ")")
 
@@ -71,7 +80,10 @@ ph_tree_clade_labs$clade <- paste0(ph_tree_clade_labs$clade, " (", sapply(ph_tre
   xx
 }), ")")
 
-ph_tree_clade_labs[1, 1] <- "Actinobacteria (41)"
+ph_tree_clade_labs$clade[1] <- "Actinobacteria(41)"
+# ph_tree_clade_labs$node[13] <- 224 #Proteobacteria label
+
+sum(as.numeric(str_match(ph_tree_tips, "(\\d+)")[,2]), as.numeric(str_match(ph_tree_clade_labs$clade, "(\\d+)")[,2]), na.rm = T)
 
 phylum_tree_final$tip.label <- ph_tree_tips
 
@@ -84,10 +96,8 @@ top_events_all <- tables2 %>%
 
 set.seed(2398473)
 pt <- ggtree::ggtree(phylum_tree_final, size = 0.3, colour = gray(level = 0.3), layout = "circular", branch.length = "none")
-ph_tree_alt <- pt %>% 
-  rotate(201) %>% 
-  rotate(214) %>% 
-  rotate(200) +
+
+ph_tree_alt <- pt + 
   geom_rootedge(rootedge = .5) +
   geom_tiplab(align = T, offset = 0.5, linesize = 0, size = 5) +
   geom_cladelab(
@@ -104,11 +114,11 @@ ph_tree_alt <- pt %>%
     show.legend = F
   )
 
-final_top_events <- top_events_all %>% 
-  filter(node %in% as.numeric(str_match(phylum_tree_final$node.label, "\\d+")[,1])) %>% 
-  select(node, n, Type)
+final_top_events <- top_events %>% 
+  filter(node %in% as.numeric(str_match(phylum_tree_final$node.label, "\\d+")[,1]))
 
-t1_final <- nest(final_top_events, n = n, Type = Type)
+t1_final <- final_top_events %>% 
+  nest(n = n, Type = Type)
 
 t1_final <- t1_final %>% 
   mutate(node = if_else(paste0("Node", node) %in% ph_tree_alt$data$label, ph_tree_alt$data$node[match(paste0("Node", node), ph_tree_alt$data$label)], node))
@@ -119,7 +129,7 @@ ph_tree_alt$data <- ph_tree_alt$data %>%
 
 ph5_alt <- ph_tree_alt +
   geom_nodepoint(mapping = aes(node = node, size = n, colour = Type), shape = 21, alpha = 1, stroke = 1, data = td_unnest(c(n, Type))) + 
-  scale_size(range = c(0.5, 15), breaks = c(ceiling(min(final_top_events$n)), 10, 25, 50, 100, 250, 500, 1000, 1500, 2500, ceiling(max(final_top_events$n))), labels = as.character(c(ceiling(min(final_top_events$n)), 10, 25, 50, 100, 250, 500, 1000, 1500, 2500, ceiling(max(final_top_events$n)))), limits = c(floor(min(final_top_events$n)), ceiling(max(final_top_events$n)))) +
+  scale_size(range = c(0.5, 15), breaks = c(ceiling(min(final_top_events$n)), 10, 25, 50, 100, 250, 500, 1000, 2000, ceiling(max(final_top_events$n))), labels = as.character(c(ceiling(min(final_top_events$n)), 10, 25, 50, 100, 250, 500, 1000, 2000, ceiling(max(final_top_events$n)))), limits = c(floor(min(final_top_events$n)), ceiling(max(final_top_events$n)))) +
   scale_color_manual(values = c(
     "Genes" = "#4daf4a",
     "Domains" = "#e41a1c",
